@@ -249,3 +249,37 @@ def test_catalog_prices_are_json_serializable():
     response = {'total_cost': cost}
     serialized_dict = orjson.dumps(response)
     assert orjson.loads(serialized_dict) == {'total_cost': 2.5}
+
+
+def test_get_hourly_cost_impl_with_duplicate_rows_in_zone_selects_valid_spot_price(
+):
+    """Duplicate catalog rows should not crash for zone-specific lookup.
+
+    Prefer the row with a valid SpotPrice (spot price per hour) and select
+    deterministically.
+    """
+    df = pd.DataFrame([
+        {
+            'InstanceType': 'p4de.24xlarge',
+            'Price': np.float64(27.44705),
+            'SpotPrice': np.float64(9.462),
+            'Region': 'us-east-1',
+            'AvailabilityZone': 'us-east-1c',
+            'GpuInfo': "{'Gpus': [{'Name': 'A100'}]}",
+        },
+        {
+            'InstanceType': 'p4de.24xlarge',
+            'Price': np.float64(27.44705),
+            'SpotPrice': np.nan,
+            'Region': 'us-east-1',
+            'AvailabilityZone': 'us-east-1c',
+            'GpuInfo': "{'Gpus': [{'Name': 'A100-80GB'}]}",
+        },
+    ])
+
+    spot_cost = catalog_common.get_hourly_cost_impl(df,
+                                                    'p4de.24xlarge',
+                                                    use_spot=True,
+                                                    region='us-east-1',
+                                                    zone='us-east-1c')
+    assert spot_cost == 9.462

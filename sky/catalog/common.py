@@ -369,12 +369,40 @@ def get_hourly_cost_impl(
             raise ValueError(f'Instance type {instance_type!r} not found '
                              f'in {region_or_zone}.')
 
-    # If the zone is specified, only one row should be found by the query.
-    assert zone is None or len(df) == 1, df
     if use_spot:
         price_str = 'SpotPrice'
     else:
         price_str = 'Price'
+
+    # If the zone is specified, normally only one row should match. However,
+    # older catalogs may contain duplicate rows for the same
+    # (InstanceType, Region, AvailabilityZone). Instead of asserting, select a
+    # row deterministically and continue.
+    if zone is not None and len(df) > 1:
+        # Prefer rows with a valid price; then pick the cheapest price.
+        # Finally, tie-break on GpuInfo (if present) to keep selection stable.
+        df_to_sort = df.copy()
+        df_to_sort['_has_price'] = ~pd.isna(df_to_sort[price_str])
+        df_to_sort['_price_for_sort'] = df_to_sort[price_str].fillna(
+            float('inf'))
+        sort_keys = ['_has_price', '_price_for_sort']
+        ascending = [False, True]
+        if 'GpuInfo' in df_to_sort.columns:
+            sort_keys.append('GpuInfo')
+            ascending.append(True)
+        # Stable sort for deterministic selection.
+        df_to_sort = df_to_sort.sort_values(by=sort_keys,
+                                            ascending=ascending,
+                                            kind='mergesort')
+        chosen_index = df_to_sort.index[0]
+        logger.warning(
+            'Duplicate catalog rows found for instance type %r in '
+            '(region=%r, zone=%r); selecting a row deterministically. '
+            'Matched rows: %d. Chosen index: %s.', instance_type, region, zone,
+            len(df), chosen_index)
+        df = df.loc[[chosen_index]]
+
+    if not use_spot:
         # For AWS/Azure/GCP on-demand instances, the price is the same across
         # all the zones in the same region.
         assert region is None or len(set(df[price_str])) == 1, df
